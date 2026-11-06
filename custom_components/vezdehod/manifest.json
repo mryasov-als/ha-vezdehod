@@ -1,0 +1,12 @@
+{
+  "domain": "vezdehod",
+  "name": "Вездеход",
+  "codeowners": ["@mryasov-als"],
+  "config_flow": true,
+  "documentation": "https://github.com/mryasov-als/ha-vezdehod",
+  "integration_type": "hub",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/mryasov-als/ha-vezdehod/issues",
+  "requirements": [],
+  "version": "0.4.3"
+}

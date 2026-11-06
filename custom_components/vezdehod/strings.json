@@ -1,0 +1,145 @@
+{
+  "title": "Vezdehod",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect Vezdehod",
+        "description": "Choose how to sign in.",
+        "menu_options": {
+          "sms_phone": "Sign in by SMS",
+          "import_key": "Import an existing key"
+        }
+      },
+      "barriers": {
+        "title": "Choose barriers",
+        "description": "An opening button will be created for each selected barrier.",
+        "data": {
+          "barrier_ids": "Barriers"
+        }
+      },
+      "reconfigure": {
+        "title": "Update credentials",
+        "description": "Choose how to sign in.",
+        "menu_options": {
+          "sms_phone": "Sign in by SMS",
+          "import_key": "Import an existing key"
+        }
+      },
+      "reauth": {
+        "title": "Restore access",
+        "description": "Choose how to sign in.",
+        "menu_options": {
+          "sms_phone": "Sign in by SMS",
+          "import_key": "Import an existing key"
+        }
+      },
+      "import_key": {
+        "title": "Import an existing key",
+        "description": "Enter the phone number (digits only, including country code) and the current mobile_key. This method does not send SMS.",
+        "data": {
+          "auth_phone": "Phone number",
+          "mobile_key": "Mobile key"
+        },
+        "data_description": {
+          "auth_phone": "Digits only, for example 79991234567."
+        }
+      },
+      "sms_phone": {
+        "title": "Request an SMS code",
+        "description": "Enter your phone number using digits only, including country code. Submit to request one SMS. A new login may sign out the Vezdehod phone app.",
+        "data": {
+          "auth_phone": "Phone number"
+        }
+      },
+      "sms_code": {
+        "title": "Confirm the SMS code",
+        "description": "Enter the SMS code for {phone}. The key is saved after access is verified. If the code was confirmed but fetching barriers failed, submit again without a code. An explicit resend is available after 60 seconds.",
+        "data": {
+          "sms_code": "SMS code",
+          "resend_sms": "Request another SMS"
+        }
+      }
+    },
+    "error": {
+      "invalid_phone": "Enter 10–15 digits including country code, without spaces or a plus sign.",
+      "invalid_key": "Enter the mobile key.",
+      "invalid_auth": "The phone number or key was rejected. Import the current key from the phone app.",
+      "cannot_connect": "Cannot reach Vezdehod. Try again later.",
+      "invalid_response": "Vezdehod returned an unexpected response.",
+      "no_barriers": "No barriers with permission to open are available for this account.",
+      "no_selection": "Choose at least one barrier.",
+      "unknown_barrier": "The selected barrier is no longer in the available list.",
+      "wrong_account": "Use the same phone number. Add another account as a separate integration.",
+      "invalid_sms_code": "Invalid code. Enter the digits from the SMS and try again.",
+      "cannot_send_sms": "The SMS request was rejected. Check the phone number and try later.",
+      "sms_delivery_unknown": "SMS delivery could not be confirmed. Enter the code if it arrived, or request another SMS after the pause.",
+      "sms_cooldown": "Wait 60 seconds after the previous SMS request."
+    },
+    "abort": {
+      "already_configured": "This phone number is already configured.",
+      "reauth_successful": "The imported key has been updated.",
+      "reconfigure_successful": "The imported credentials have been updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Barriers and photos",
+        "data": {
+          "barrier_ids": "Barriers",
+          "save_snapshots": "Save a photo when opening"
+        },
+        "data_description": {
+          "save_snapshots": "Fetch a photo 3 seconds after pressing the button and save it to Media. Photo errors do not block opening."
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Replace the expired key using Reconfigure.",
+      "cannot_connect": "Cannot reach Vezdehod. Try again later.",
+      "invalid_response": "Vezdehod returned an unexpected response.",
+      "no_barriers": "No barriers with permission to open are available.",
+      "no_selection": "Choose at least one barrier.",
+      "unknown_barrier": "The selected barrier is no longer available."
+    }
+  },
+  "entity": {
+    "button": {
+      "open": {
+        "name": "Open"
+      }
+    },
+    "sensor": {
+      "key_status": {
+        "name": "Key status"
+      }
+    },
+    "camera": {
+      "camera": {
+        "name": "Camera"
+      }
+    },
+    "image": {
+      "opening_photo": {
+        "name": "Last opening photo"
+      }
+    }
+  },
+  "exceptions": {
+    "unavailable": {
+      "message": "This barrier is currently unavailable or opening is not permitted."
+    },
+    "busy": {
+      "message": "A command is already being processed. Wait a few seconds before pressing again."
+    },
+    "invalid_auth": {
+      "message": "Access has expired. Import the current key from the phone app."
+    },
+    "cannot_connect": {
+      "message": "Cannot send the opening command to Vezdehod."
+    },
+    "opening_not_confirmed": {
+      "message": "Vezdehod did not confirm the opening command."
+    }
+  }
+}

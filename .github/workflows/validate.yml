@@ -1,0 +1,47 @@
+name: Проверки интеграции
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  hacs:
+    name: HACS
+    runs-on: ubuntu-latest
+    steps:
+      - name: Проверка HACS
+        uses: hacs/action@main
+        with:
+          category: integration
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Проверка Home Assistant
+        uses: home-assistant/actions/hassfest@master
+
+  tests:
+    name: Автономные тесты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+      - name: Установка тестовых зависимостей
+        run: python -m pip install -r requirements-test.txt
+      - name: Проверка кода
+        run: |
+          ruff check custom_components tests
+          ruff format --check custom_components tests
+      - name: Тесты без доступа к сервису Вездеход
+        run: python -X faulthandler -m pytest tests -q -p no:cacheprovider --tb=short --show-capture=no
