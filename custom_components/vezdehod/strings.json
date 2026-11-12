@@ -90,7 +90,7 @@
           "save_snapshots": "Save a photo when opening"
         },
         "data_description": {
-          "save_snapshots": "Fetch a photo 3 seconds after pressing the button and save it to Media. Photo errors do not block opening."
+          "save_snapshots": "Save a photo in vezdehod/snapshots in the Home Assistant configuration directory 3 seconds after pressing the button."
         }
       }
     },

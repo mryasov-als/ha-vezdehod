@@ -1,6 +1,7 @@
 """Exercise camera viewing and opening snapshots without cloud operations."""
 
 import asyncio
+from os import utime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -121,10 +122,19 @@ async def test_selection_change_removes_old_camera_and_image(hass, camera_api):
 
 
 async def test_opening_saves_photo_in_event_and_image_without_activity(hass, camera_api):
+    from aiohttp.test_utils import TestClient, TestServer
+
     saved, activity = [], []
     hass.bus.async_listen("vezdehod_snapshot_saved", saved.append)
     hass.bus.async_listen("logbook_entry", activity.append)
-    entry, _ = await setup_camera(hass, save_snapshots=True)
+    entry, _ = await setup_camera(hass, save_snapshots=None)
+    options = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        options["flow_id"], {"barrier_ids": ["101"], "save_snapshots": True}
+    )
+    assert result["type"] == "create_entry"
+    await hass.async_block_till_done()
+    assert entry.options["save_snapshots"] is True
     user = await hass.auth.async_create_user("Snapshot test", group_ids=["system-admin"])
     context = Context(user_id=user.id)
     await press(hass, context)
@@ -132,9 +142,10 @@ async def test_opening_saves_photo_in_event_and_image_without_activity(hass, cam
     assert len(saved) == 1
     data = saved[0].data
     photo = Path(data["file_path"])
-    assert photo.is_relative_to(Path(hass.config.media_dirs["local"]))
+    assert photo.is_relative_to(Path(hass.config.path("vezdehod", "snapshots")))
+    assert not photo.is_relative_to(Path(hass.config.media_dirs["local"]))
     assert photo.read_bytes() == camera_api[4].return_value
-    assert data["media_content_id"].startswith("media-source://media_source/local/vezdehod/")
+    assert "media_content_id" not in data
     assert data["barrier_id"] == "101"
     assert saved[0].context.id == context.id
     assert activity == []
@@ -142,6 +153,13 @@ async def test_opening_saves_photo_in_event_and_image_without_activity(hass, cam
     assert image.state not in ("unavailable", "unknown")
     assert image.attributes["file_path"] == str(photo)
     assert "camera_token" not in str(image.attributes)
+    async with TestClient(TestServer(hass.http.app)) as client:
+        image_url = image.attributes["entity_picture"]
+        rejected = await client.get(image_url.split("?", 1)[0])
+        assert rejected.status == 403
+        response = await client.get(image_url)
+        assert response.status == 200
+        assert await response.read() == photo.read_bytes()
     camera_api[1].assert_awaited_once_with("101")
     before = camera_api[4].await_count
     assert await hass.config_entries.async_reload(entry.entry_id)
@@ -179,7 +197,7 @@ async def test_failed_photo_does_not_fail_successful_opening(hass, camera_api):
     await press(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     camera_api[1].assert_awaited_once_with("101")
-    assert not list(Path(hass.config.media_dirs["local"]).rglob("*.jpg"))
+    assert not list(Path(hass.config.path("vezdehod", "snapshots")).rglob("*.jpg"))
     assert activity == []
 
 
@@ -285,20 +303,69 @@ async def test_photo_filename_uses_configured_ha_timezone(
         ),
     ],
 )
-async def test_restore_compares_instants_in_legacy_and_local_names(
+async def test_migration_restores_latest_photo_from_legacy_media(
     hass, camera_api, filenames, expected_name, expected_time
 ):
-    entry, _ = await setup_camera(hass, save_snapshots=True)
-    directory = entry.runtime_data.snapshots.root / "101"
+    entry, _ = await setup_camera(hass, save_snapshots=None)
+    account = entry.runtime_data.snapshots.root.name
+    directory = Path(hass.config.media_dirs["local"]) / "vezdehod" / account / "101"
     directory.mkdir(parents=True)
     for name in [*filenames, "invalid-name.jpg"]:
         (directory / name).write_bytes(camera_api[4].return_value)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     snapshot = entry.runtime_data.snapshots.latest["101"]
+    archive = Path(hass.config.path("vezdehod", "snapshots", account, "101"))
+    assert {path.name for path in archive.glob("*.jpg")} == set(filenames)
+    assert list(directory.glob("*.jpg")) == [directory / "invalid-name.jpg"]
+    assert snapshot.file_path.parent == archive
     assert snapshot.file_path.name == expected_name
     assert snapshot.created_at == dt_util.parse_datetime(expected_time)
     assert hass.states.async_all("image")[0].attributes["file_path"] == str(snapshot.file_path)
+    camera_api[4].assert_not_awaited()
+
+
+@pytest.mark.parametrize("media_id", ["local", "previous", "linked"])
+async def test_legacy_photo_is_preserved_until_migration_can_complete(
+    hass, camera_api, monkeypatch, media_id
+):
+    hass.config.media_dirs["previous"] = hass.config.path("previous_media")
+    hass.config.media_dirs["linked"] = hass.config.path("linked_media")
+    entry, _ = await setup_camera(hass, save_snapshots=None)
+    account = entry.runtime_data.snapshots.root.name
+    filename = "20261105T104000_123456Z.jpg"
+    legacy_account = Path(hass.config.media_dirs[media_id]) / "vezdehod" / account
+    if media_id == "linked":
+        linked_archive = Path(hass.config.path("old_photo_archive"))
+        linked_archive.mkdir()
+        legacy_account.parent.mkdir(parents=True)
+        legacy_account.symlink_to(linked_archive, target_is_directory=True)
+    source = legacy_account / "102" / filename
+    target = Path(hass.config.path("vezdehod", "snapshots", account, "102", filename))
+    source.parent.mkdir(parents=True)
+    source.write_bytes(camera_api[4].return_value)
+    original_unlink = Path.unlink
+
+    def fail_source_unlink(path, *args, **kwargs):
+        if path == source:
+            raise PermissionError("Legacy archive is read-only")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", fail_source_unlink)
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await hass.async_block_till_done()
+        assert source.read_bytes() == target.read_bytes() == camera_api[4].return_value
+        assert source.stat().st_mtime_ns == target.stat().st_mtime_ns
+
+    saved_at = source.stat().st_mtime_ns
+    utime(target, (0, 0))
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done()
+    assert not source.exists()
+    assert list(target.parent.glob("*.jpg")) == [target]
+    assert target.read_bytes() == camera_api[4].return_value
+    assert target.stat().st_mtime_ns == saved_at
     camera_api[4].assert_not_awaited()
 
 
@@ -323,10 +390,10 @@ async def test_unreadable_photo_directory_does_not_prevent_button_setup(
     hass, camera_api, monkeypatch
 ):
     original_glob = Path.glob
-    media_root = Path(hass.config.media_dirs["local"])
+    archive = Path(hass.config.path("vezdehod", "snapshots"))
 
     def guarded_glob(path, *args, **kwargs):
-        if path.is_relative_to(media_root):
+        if path.is_relative_to(archive):
             raise PermissionError("Test storage is unavailable")
         return original_glob(path, *args, **kwargs)
 
@@ -378,19 +445,30 @@ async def test_standard_ha_mjpeg_stream_refreshes_frames(hass, camera_api):
     camera_api[1].assert_not_awaited()
 
 
-async def test_opening_photo_is_enabled_by_default(hass, camera_api):
+async def test_opening_photo_is_disabled_by_default(hass, camera_api):
     await setup_camera(hass, save_snapshots=None)
     await press(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert hass.states.async_all("image")[0].state not in ("unknown", "unavailable")
+    camera_api[1].assert_awaited_once_with("101")
+    camera_api[4].assert_not_awaited()
+    assert hass.states.async_all("image")[0].state == "unavailable"
+
+
+@pytest.mark.parametrize(("saved", "expected"), [(None, False), (True, True), (False, False)])
+async def test_photo_checkbox_uses_saved_setting_or_defaults_to_off(
+    hass, camera_api, saved, expected
+):
+    entry, _ = await setup_camera(hass, save_snapshots=saved)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["data_schema"]({"barrier_ids": ["101"]})["save_snapshots"] is expected
 
 
 async def test_photo_write_error_does_not_fail_opening(hass, camera_api, monkeypatch):
     original_write = Path.write_bytes
-    media_root = Path(hass.config.media_dirs["local"])
+    archive = Path(hass.config.path("vezdehod", "snapshots"))
 
     def guarded_write(path, content):
-        if path.is_relative_to(media_root):
+        if path.is_relative_to(archive):
             raise PermissionError("Test storage is read-only")
         return original_write(path, content)
 
@@ -399,6 +477,17 @@ async def test_photo_write_error_does_not_fail_opening(hass, camera_api, monkeyp
     await press(hass)
     await hass.async_block_till_done(wait_background_tasks=True)
     camera_api[1].assert_awaited_once_with("101")
+    assert hass.states.async_all("image")[0].state == "unavailable"
+
+
+async def test_photo_is_not_written_when_archive_overlaps_configured_media(hass, camera_api):
+    shared = Path(hass.config.path("vezdehod", "snapshots"))
+    hass.config.media_dirs["shared"] = str(shared)
+    await setup_camera(hass, save_snapshots=True)
+    await press(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    camera_api[1].assert_awaited_once_with("101")
+    assert not list(shared.rglob("*.jpg"))
     assert hass.states.async_all("image")[0].state == "unavailable"
 
 

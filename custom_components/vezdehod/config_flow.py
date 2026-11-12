@@ -336,6 +336,7 @@ class VezdehodOptionsFlow(OptionsFlow):
     """Change which account barriers have buttons."""
 
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        save_snapshots = self.config_entry.options.get(CONF_SAVE_SNAPSHOTS, False)
         _, barriers, errors = await _validate_credentials(
             self.hass, dict(self.config_entry.data), require_barriers=False
         )
@@ -357,10 +358,7 @@ class VezdehodOptionsFlow(OptionsFlow):
                     data={
                         **self.config_entry.options,
                         CONF_BARRIER_IDS: list(dict.fromkeys(user_input[CONF_BARRIER_IDS])),
-                        CONF_SAVE_SNAPSHOTS: user_input.get(
-                            CONF_SAVE_SNAPSHOTS,
-                            self.config_entry.options.get(CONF_SAVE_SNAPSHOTS, True),
-                        ),
+                        CONF_SAVE_SNAPSHOTS: user_input.get(CONF_SAVE_SNAPSHOTS, save_snapshots),
                     },
                 )
         selected = [
@@ -371,7 +369,7 @@ class VezdehodOptionsFlow(OptionsFlow):
                 **_barriers_schema(barriers, selected).schema,
                 probatio.Required(
                     CONF_SAVE_SNAPSHOTS,
-                    default=self.config_entry.options.get(CONF_SAVE_SNAPSHOTS, True),
+                    default=save_snapshots,
                 ): selector.BooleanSelector(),
             }
         )

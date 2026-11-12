@@ -1,4 +1,4 @@
-"""Save opening photos in HA media without delaying barrier commands."""
+"""Save opening photos in the HA configuration directory."""
 
 import asyncio
 import logging
@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
+from shutil import copy2, copystat
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
@@ -29,7 +31,6 @@ if TYPE_CHECKING:
 class Snapshot:
     file_path: Path
     created_at: datetime
-    media_content_id: str
     saved_at: datetime
 
     def attributes(self) -> dict[str, str]:
@@ -37,7 +38,6 @@ class Snapshot:
             "file_path": str(self.file_path),
             "captured_at": self.created_at.isoformat(),
             "saved_at": self.saved_at.isoformat(),
-            "media_content_id": self.media_content_id,
         }
 
 
@@ -46,11 +46,12 @@ class VezdehodSnapshots:
         self, hass: HomeAssistant, entry: ConfigEntry, coordinator: VezdehodCoordinator
     ) -> None:
         self.hass, self.entry, self.coordinator = hass, entry, coordinator
-        dirs = hass.config.media_dirs
-        self._media_id = "local" if "local" in dirs else next(iter(dirs), "local")
-        self._media_root = Path(dirs.get(self._media_id, hass.config.path("media")))
+        media_roots = tuple(map(Path, hass.config.media_dirs.values()))
+        legacy_media_roots = dict.fromkeys((*media_roots, Path(hass.config.path("media"))))
         account = sha256((entry.unique_id or entry.entry_id).encode()).hexdigest()[:16]
-        self.root = self._media_root / DOMAIN / account
+        self.root = Path(hass.config.path(DOMAIN, "snapshots", account))
+        self._legacy_roots = tuple(root / DOMAIN / account for root in legacy_media_roots)
+        self._shared_roots = (*media_roots, Path(hass.config.path("www")))
         self.signal = f"{DOMAIN}_snapshot_{entry.entry_id}"
         self.latest: dict[str, Snapshot] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -60,7 +61,13 @@ class VezdehodSnapshots:
     def _directory(self, uid: str) -> Path:
         if not re.fullmatch(r"[0-9]+", uid) or int(uid) <= 0:
             raise ValueError("Invalid barrier identifier")
-        return self.root / uid
+        directory = self.root / uid
+        resolved = directory.resolve()
+        if not resolved.is_relative_to(self.root.resolve()):
+            raise OSError("Snapshot directory is outside the archive")
+        if any(resolved.is_relative_to(root.resolve()) for root in self._shared_roots):
+            raise OSError("Snapshot directory is shared through Media or www")
+        return directory
 
     def _snapshot(self, path: Path) -> Snapshot:
         if path.stem.endswith("Z"):
@@ -70,16 +77,56 @@ class VezdehodSnapshots:
         else:
             timestamp = datetime.strptime(path.stem, _LOCAL_FILENAME)
         timestamp = dt_util.as_utc(timestamp)
-        relative = path.relative_to(self._media_root).as_posix()
         return Snapshot(
             path,
             timestamp,
-            f"media-source://media_source/{self._media_id}/{relative}",
             datetime.fromtimestamp(path.stat().st_mtime, tz=dt_util.UTC),
         )
 
+    def _move_legacy_photo(self, source: Path) -> None:
+        self._snapshot(source)  # Only move files with a snapshot filename.
+        target = self._directory(source.parent.name) / source.name
+        if target.exists():
+            if target.is_symlink() or target.read_bytes() != source.read_bytes():
+                raise FileExistsError("Different opening photo at the destination")
+            if target.resolve() == source.resolve():
+                return
+            if target.stat().st_mtime_ns != source.stat().st_mtime_ns:
+                copystat(source, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            # Media and configuration can be separate mounts. Rename the
+            # complete copy within the destination before removing the source.
+            with TemporaryDirectory(dir=target.parent) as staging_dir:
+                temporary = Path(staging_dir) / source.name
+                copy2(source, temporary)
+                temporary.replace(target)
+        source.unlink()
+
+    def _migrate_legacy(self, legacy_root: Path) -> None:
+        try:
+            resolved_root = legacy_root.resolve()
+            if resolved_root == self.root.resolve():
+                return
+            paths = list(legacy_root.glob("*/*.jpg"))
+        except OSError as err:
+            _LOGGER.warning("Unable to read old opening photo archive: %s", err)
+            return
+        for path in paths:
+            try:
+                if path.is_file(follow_symlinks=False) and path.resolve().is_relative_to(
+                    resolved_root
+                ):
+                    self._move_legacy_photo(path)
+            except ValueError:
+                continue
+            except OSError as err:
+                _LOGGER.warning("Unable to migrate opening photo %s: %s", path.name, err)
+
     async def async_initialize(self) -> None:
         def restore():
+            for legacy_root in self._legacy_roots:
+                self._migrate_legacy(legacy_root)
             result = {}
             for uid in self.entry.options.get(CONF_BARRIER_IDS, []):
                 try:
@@ -88,7 +135,7 @@ class VezdehodSnapshots:
                     continue
                 for path in files:
                     try:
-                        if path.resolve().is_relative_to(self.root.resolve()):
+                        if path.is_file(follow_symlinks=False):
                             snapshot = self._snapshot(path)
                             if uid not in result or snapshot.created_at > result[uid].created_at:
                                 result[uid] = snapshot
@@ -105,7 +152,7 @@ class VezdehodSnapshots:
 
     @callback
     def async_schedule(self, uid: str, entity_id: str | None, context: Context | None) -> None:
-        if not self.entry.options.get(CONF_SAVE_SNAPSHOTS, True):
+        if not self.entry.options.get(CONF_SAVE_SNAPSHOTS, False):
             return
         barrier = (self.coordinator.data or {}).get(uid)
         if not barrier or not barrier.camera_url:
@@ -129,8 +176,6 @@ class VezdehodSnapshots:
     def _write(self, uid: str, content: bytes, created_at: datetime) -> Snapshot:
         directory = self._directory(uid)
         directory.mkdir(parents=True, exist_ok=True)
-        if not directory.resolve().is_relative_to(self.root.resolve()):
-            raise OSError("Snapshot directory is outside its media root")
         target = directory / (dt_util.as_local(created_at).strftime(_LOCAL_FILENAME) + ".jpg")
         temporary = target.with_suffix(".tmp")
         try:
