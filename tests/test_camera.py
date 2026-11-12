@@ -405,8 +405,9 @@ async def test_unreadable_photo_directory_does_not_prevent_button_setup(
     camera_api[1].assert_awaited_once_with("101")
 
 
+@pytest.mark.parametrize("busy_step", ["migration", "media_resolution"])
 async def test_slow_migration_leaves_button_and_existing_photo_available(
-    hass, camera_api, monkeypatch
+    hass, camera_api, monkeypatch, busy_step
 ):
     from custom_components.vezdehod.snapshot import VezdehodSnapshots
 
@@ -423,7 +424,18 @@ async def test_slow_migration_leaves_button_and_existing_photo_available(
         hass.loop.call_soon_threadsafe(entered.set)
         release.wait(5)
 
-    monkeypatch.setattr(VezdehodSnapshots, "_migrate_legacy", slow_migration)
+    if busy_step == "migration":
+        monkeypatch.setattr(VezdehodSnapshots, "_migrate_legacy", slow_migration)
+    else:
+        media = Path(hass.config.media_dirs["local"])
+        resolve = Path.resolve
+
+        def slow_media_resolve(path, *args, **kwargs):
+            if path.is_relative_to(media):
+                slow_migration(None, media)
+            return resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", slow_media_resolve)
     try:
         await asyncio.wait_for(hass.config_entries.async_add(entry), timeout=2)
         await asyncio.wait_for(entered.wait(), timeout=2)
@@ -434,6 +446,69 @@ async def test_slow_migration_leaves_button_and_existing_photo_available(
     finally:
         release.set()
         await hass.async_block_till_done(wait_background_tasks=True)
+
+
+@pytest.mark.parametrize("stop_at", ["collision_read", "after_commit"])
+async def test_unload_stops_pending_migration_changes(hass, camera_api, monkeypatch, stop_at):
+    from custom_components.vezdehod.snapshot import VezdehodSnapshots
+
+    entry, _ = await setup_camera(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    root = entry.runtime_data.snapshots.root
+    filename = "20261105T104000_123456Z.jpg"
+    media = Path(hass.config.media_dirs["local"])
+    source = media / "vezdehod" / root.name / "101" / filename
+    target = root / "101" / filename
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    source.write_bytes(b"legacy photo")
+    target.write_bytes(b"archived photo")
+
+    entered, finished, release = asyncio.Event(), asyncio.Event(), Event()
+    move_photo = VezdehodSnapshots._move_legacy_photo
+
+    def pause():
+        hass.loop.call_soon_threadsafe(entered.set)
+        release.wait(5)
+
+    def watch_move(snapshots, path):
+        try:
+            return move_photo(snapshots, path)
+        finally:
+            hass.loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(VezdehodSnapshots, "_move_legacy_photo", watch_move)
+    if stop_at == "collision_read":
+        read_bytes = Path.read_bytes
+
+        def slow_read(path):
+            if path == target:
+                pause()
+            return read_bytes(path)
+
+        monkeypatch.setattr(Path, "read_bytes", slow_read)
+    else:
+        commit = VezdehodSnapshots._commit_photo
+
+        def pause_after_commit(snapshots, staged, destination):
+            committed = commit(snapshots, staged, destination)
+            pause()
+            return committed
+
+        monkeypatch.setattr(VezdehodSnapshots, "_commit_photo", pause_after_commit)
+
+    try:
+        assert await hass.config_entries.async_reload(entry.entry_id)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert await asyncio.wait_for(hass.config_entries.async_unload(entry.entry_id), timeout=2)
+    finally:
+        release.set()
+    await asyncio.wait_for(finished.wait(), timeout=2)
+    assert source.read_bytes() == b"legacy photo"
+    contents = {photo.read_bytes() for photo in target.parent.glob("*.jpg")}
+    assert contents == (
+        {b"archived photo"} if stop_at == "collision_read" else {b"archived photo", b"legacy photo"}
+    )
 
 
 @pytest.mark.parametrize("former_default", [False, True])

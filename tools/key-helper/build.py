@@ -57,10 +57,11 @@ def build(sdk):
             "/r:System.IO.Compression.dll", "/r:System.IO.Compression.FileSystem.dll"]
     core = ["src/Core.cs", "src/ProcessRunner.cs", "src/PrivateAdb.cs"]
     compile_to(BUILD / "CoreTests.exe", [*core, "tests/CoreTests.cs"])
-    run([BUILD / "CoreTests.exe"], timeout=10)
+    core_tests = run([BUILD / "CoreTests.exe"], timeout=10).stdout.strip()
     compile_to(BUILD / "KeyHelperTestChild.exe", ["tests/Child.cs"])
     compile_to(BUILD / "InfrastructureTests.exe", [*core, "tests/InfrastructureTests.cs"])
-    run([BUILD / "InfrastructureTests.exe", BUILD / "KeyHelperTestChild.exe"], timeout=15)
+    infrastructure_tests = run([BUILD / "InfrastructureTests.exe", BUILD / "KeyHelperTestChild.exe"],
+                               timeout=15).stdout.strip()
 
     logo = ROOT.parents[1] / "custom_components/vezdehod/brand/icon.png"
     png = logo.read_bytes()
@@ -82,7 +83,8 @@ def build(sdk):
     assert preview.read_bytes().startswith(b"\x89PNG")
     info = {"version": "0.1.2", "file": exe.name, "bytes": exe.stat().st_size,
             "sha256": hashlib.sha256(exe.read_bytes()).hexdigest(), "adb_revision": revision,
-            "adb_files": hashes, "self_check": "passed; embedded ADB version only, no devices queried",
+            "adb_files": hashes, "core_tests": core_tests, "infrastructure_tests": infrastructure_tests,
+            "self_check": "passed; embedded ADB version only, no devices queried",
             "ui_preview": "preview.png", "real_phone_capture_tested": False}
     (ROOT / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(info, ensure_ascii=False, indent=2))

@@ -62,16 +62,22 @@ class VezdehodSnapshots:
         self._sequence = 0
         self._latest_sequence: dict[str, int] = {}
 
-    def _directory(self, uid: str) -> Path:
+    def _directory(self, uid: str, *, for_write: bool = False) -> Path:
         if not re.fullmatch(r"[0-9]+", uid) or int(uid) <= 0:
             raise ValueError("Invalid barrier identifier")
         directory = self.root / uid
         resolved = directory.resolve()
         if not resolved.is_relative_to(self.root.resolve()):
             raise OSError("Snapshot directory is outside the archive")
-        if any(resolved.is_relative_to(root.resolve()) for root in self._shared_roots):
+        if for_write and any(
+            resolved.is_relative_to(root.resolve()) for root in self._shared_roots
+        ):
             raise OSError("Snapshot directory is shared through Media or www")
         return directory
+
+    def _check_running(self) -> None:
+        if self._stopping.is_set():
+            raise InterruptedError("Snapshot archive is unloading")
 
     def _snapshot(self, path: Path) -> Snapshot:
         name, separator, digest = path.stem.partition(".")
@@ -91,8 +97,7 @@ class VezdehodSnapshots:
     def _commit_photo(self, staged: Path, target: Path) -> Path:
         """Publish a complete JPEG without overwriting a different frame."""
         with _ARCHIVE_COMMIT_LOCK:
-            if self._stopping.is_set():
-                raise InterruptedError("Snapshot archive is unloading")
+            self._check_running()
             if target.exists():
                 content = staged.read_bytes()
                 if target.is_symlink() or target.read_bytes() != content:
@@ -102,23 +107,25 @@ class VezdehodSnapshots:
                     if target.is_symlink() or target.read_bytes() != content:
                         raise FileExistsError("Different opening photo at the destination")
                     if target.stat().st_mtime_ns != staged.stat().st_mtime_ns:
+                        self._check_running()
                         copystat(staged, target)
                     return target
+            self._check_running()
             staged.replace(target)
         return target
 
     def _move_legacy_photo(self, source: Path) -> None:
         self._snapshot(source)  # Only move files with a snapshot filename.
-        target = self._directory(source.parent.name) / source.name
+        target = self._directory(source.parent.name, for_write=True) / source.name
         if target.resolve() == source.resolve():
             return
+        self._check_running()
         target.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(dir=target.parent) as staging_dir:
             staged = Path(staging_dir) / source.name
             copy2(source, staged)
-            if self._stopping.is_set():
-                return
             self._commit_photo(staged, target)
+        self._check_running()
         source.unlink(missing_ok=True)
 
     def _migrate_legacy(self, legacy_root: Path) -> bool:
@@ -247,7 +254,8 @@ class VezdehodSnapshots:
         )
 
     def _write(self, uid: str, content: bytes, created_at: datetime) -> Snapshot:
-        directory = self._directory(uid)
+        directory = self._directory(uid, for_write=True)
+        self._check_running()
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / (dt_util.as_local(created_at).strftime(_LOCAL_FILENAME) + ".jpg")
         with TemporaryDirectory(dir=directory) as staging_dir:
