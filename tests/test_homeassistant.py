@@ -329,29 +329,43 @@ async def test_options_change_the_selected_barrier(hass, mock_api):
     mock_api[1].assert_awaited_once_with("102")
 
 
-async def test_reauth_imports_key_without_changing_phone(hass, mock_api):
+@pytest.mark.parametrize(
+    "source", [config_entries.SOURCE_REAUTH, config_entries.SOURCE_RECONFIGURE]
+)
+@pytest.mark.parametrize("key", ["replacement-imported-key", KEY], ids=["changed", "unchanged"])
+@pytest.mark.parametrize("loaded", [True, False], ids=["loaded", "unloaded"])
+async def test_importing_key_for_existing_entry_reloads_once(
+    hass, mock_api, monkeypatch, source, key, loaded
+):
     entry = make_entry()
     await hass.config_entries.async_add(entry)
+    await hass.async_block_till_done()
+    if not loaded:
+        assert await hass.config_entries.async_unload(entry.entry_id)
+    reload_entry = AsyncMock(wraps=hass.config_entries.async_reload)
+    monkeypatch.setattr(hass.config_entries, "async_reload", reload_entry)
     result = await hass.config_entries.flow.async_init(
         DOMAIN,
         context={
-            "source": config_entries.SOURCE_REAUTH,
+            "source": source,
             "entry_id": entry.entry_id,
             "unique_id": entry.unique_id,
         },
-        data=dict(entry.data),
+        data=dict(entry.data) if source == config_entries.SOURCE_REAUTH else None,
     )
     result = await hass.config_entries.flow.async_configure(
         result["flow_id"], {"next_step_id": "import_key"}
     )
     assert result["step_id"] == "import_key"
-    result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {"mobile_key": "replacement-imported-key"}
-    )
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {"mobile_key": key})
     assert result["type"] == FlowResultType.ABORT
-    assert result["reason"] == "reauth_successful"
-    assert entry.data == {"auth_phone": PHONE, "mobile_key": "replacement-imported-key"}
+    assert result["reason"] == f"{source}_successful"
+    assert entry.data == {"auth_phone": PHONE, "mobile_key": key}
+    await hass.async_block_till_done()
+    reload_entry.assert_awaited_once_with(entry.entry_id)
+    assert entry.state is config_entries.ConfigEntryState.LOADED
     mock_api[1].assert_not_awaited()
+    mock_api[2].assert_not_awaited()
 
 
 async def test_reconfigure_rejects_different_account(hass, mock_api):

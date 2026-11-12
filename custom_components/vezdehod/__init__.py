@@ -23,7 +23,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: VezdehodConfigEntry) -> 
     )
     coordinator = VezdehodCoordinator(hass, entry, api)
     await coordinator.async_config_entry_first_refresh()
-    await coordinator.snapshots.async_initialize()
     entry.runtime_data = coordinator
     entry.async_on_unload(coordinator.snapshots.async_cancel)
     # A changed selection must remove the old button, not leave a restored ghost.
@@ -42,6 +41,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: VezdehodConfigEntry) -> 
             registry.async_remove(entity.entity_id)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    coordinator.snapshots.async_start_restore()
     return True
 
 

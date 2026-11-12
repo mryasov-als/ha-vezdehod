@@ -32,20 +32,21 @@ class VezdehodOpeningImage(ImageEntity):
         self._attr_device_info = barrier_device_info(
             hass, entry, uid, entry.runtime_data.data.get(uid)
         )
-        if snapshot := self._snapshots.latest.get(uid):
-            self._attr_image_last_updated = snapshot.created_at
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(
             async_dispatcher_connect(self.hass, self._snapshots.signal, self._snapshot_updated)
         )
+        if snapshot := self._snapshots.latest.get(self._uid):
+            self._attr_image_last_updated = snapshot.created_at
 
     @callback
     def _snapshot_updated(self, uid: str, context: Context | None) -> None:
         if uid != self._uid:
             return
-        self._attr_image_last_updated = self._snapshots.latest[uid].created_at
+        snapshot = self._snapshots.latest.get(uid)
+        self._attr_image_last_updated = snapshot.created_at if snapshot else None
         if context:
             self.async_set_context(context)
         self.async_write_ha_state()
@@ -64,9 +65,4 @@ class VezdehodOpeningImage(ImageEntity):
         )
 
     async def async_image(self) -> bytes | None:
-        if snapshot := self._snapshots.latest.get(self._uid):
-            try:
-                return await self.hass.async_add_executor_job(snapshot.file_path.read_bytes)
-            except OSError:
-                return None
-        return None
+        return await self._snapshots.async_read_latest(self._uid)

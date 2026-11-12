@@ -9,10 +9,24 @@ namespace VezdehodKeyHelper
     public sealed class ProcessRunner : IAdbRunner
     {
         private readonly string executable;
+        private readonly Action<ProcessStartInfo> configure;
         private const int OutputLimit = 2 * 1024 * 1024;
-        public ProcessRunner(string path) { executable = path; }
+        public ProcessRunner(string path, Action<ProcessStartInfo> configure = null)
+        { executable = path; this.configure = configure; }
 
-        private static void Stop(Process process)
+        internal static ProcessStartInfo CreateStartInfo(string executable, string arguments)
+        {
+            return new ProcessStartInfo {
+                FileName = executable, Arguments = arguments,
+                WorkingDirectory = Path.GetDirectoryName(executable),
+                UseShellExecute = false, CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                RedirectStandardOutput = true, RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
+            };
+        }
+
+        internal static void Stop(Process process)
         {
             try { if (!process.HasExited) process.Kill(); }
             catch (InvalidOperationException) { }
@@ -29,14 +43,7 @@ namespace VezdehodKeyHelper
                 object gate = new object();
                 StringBuilder output = new StringBuilder(), error = new StringBuilder();
                 bool overflow = false;
-                process.StartInfo = new ProcessStartInfo {
-                    FileName = executable, Arguments = arguments,
-                    WorkingDirectory = Path.GetDirectoryName(executable),
-                    UseShellExecute = false, CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    RedirectStandardOutput = true, RedirectStandardError = true,
-                    StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
-                };
+                process.StartInfo = CreateStartInfo(executable, arguments);
                 DataReceivedEventHandler readOutput = delegate(object sender, DataReceivedEventArgs e) {
                     lock (gate)
                     {
@@ -55,6 +62,7 @@ namespace VezdehodKeyHelper
                 };
                 try
                 {
+                    if (configure != null) configure(process.StartInfo);
                     process.OutputDataReceived += readOutput;
                     process.ErrorDataReceived += readError;
                     process.Start();

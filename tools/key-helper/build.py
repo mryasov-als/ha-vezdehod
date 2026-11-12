@@ -55,7 +55,7 @@ def build(sdk):
         entries + '\n};\n}}\n', encoding="utf-8")
     refs = ["/r:System.Core.dll", "/r:System.Drawing.dll", "/r:System.Windows.Forms.dll",
             "/r:System.IO.Compression.dll", "/r:System.IO.Compression.FileSystem.dll"]
-    core = ["src/Core.cs", "src/ProcessRunner.cs"]
+    core = ["src/Core.cs", "src/ProcessRunner.cs", "src/PrivateAdb.cs"]
     compile_to(BUILD / "CoreTests.exe", [*core, "tests/CoreTests.cs"])
     run([BUILD / "CoreTests.exe"], timeout=10)
     compile_to(BUILD / "KeyHelperTestChild.exe", ["tests/Child.cs"])
@@ -80,11 +80,10 @@ def build(sdk):
     preview = ROOT / "preview.png"
     run([exe, "--preview", preview], timeout=15, creationflags=subprocess.CREATE_NO_WINDOW)
     assert preview.read_bytes().startswith(b"\x89PNG")
-    info = {"version": "0.1.1", "file": exe.name, "bytes": exe.stat().st_size,
+    info = {"version": "0.1.2", "file": exe.name, "bytes": exe.stat().st_size,
             "sha256": hashlib.sha256(exe.read_bytes()).hexdigest(), "adb_revision": revision,
             "adb_files": hashes, "self_check": "passed; embedded ADB version only, no devices queried",
-            "ui_preview": "preview.png", "real_phone_capture_tested": True,
-            "real_phone_capture_evidence": "User confirmed on 2026-11-06: helper found phone and key when opening Vezdehod"}
+            "ui_preview": "preview.png", "real_phone_capture_tested": False}
     (ROOT / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(info, ensure_ascii=False, indent=2))
 

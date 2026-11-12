@@ -165,7 +165,13 @@ class VezdehodConfigFlow(ConfigFlow, domain=DOMAIN):
                 if self.context.get("source") == SOURCE_REAUTH
                 else "reconfigure_successful"
             )
-            return self.async_update_reload_and_abort(entry, data=credentials, reason=reason)
+            entries = self.hass.config_entries
+            # The listener can start unloading the entry during the update.
+            has_update_listener = bool(entry.update_listeners)
+            changed = entries.async_update_entry(entry, data=entry.data | credentials)
+            if not changed or not has_update_listener:
+                entries.async_schedule_reload(entry.entry_id)
+            return self.async_abort(reason=reason)
         self._credentials, self._barriers = credentials, barriers
         await self.async_set_unique_id(sha256(credentials[CONF_AUTH_PHONE].encode()).hexdigest())
         self._abort_if_unique_id_configured()

@@ -1,6 +1,5 @@
 """Save opening photos in the HA configuration directory."""
 
-import asyncio
 import logging
 import re
 from asyncio import sleep
@@ -10,6 +9,7 @@ from hashlib import sha256
 from pathlib import Path
 from shutil import copy2, copystat
 from tempfile import TemporaryDirectory
+from threading import Event, Lock
 from typing import TYPE_CHECKING
 
 from homeassistant.config_entries import ConfigEntry
@@ -22,6 +22,8 @@ from .const import CONF_BARRIER_IDS, CONF_SAVE_SNAPSHOTS, DOMAIN, SNAPSHOT_DELAY
 
 _LOGGER = logging.getLogger(__name__)
 _LOCAL_FILENAME = "%Y-%m-%d_%H-%M-%S_%f%z"
+_DEFAULT_MEDIA_ROOT = Path("/media")
+_ARCHIVE_COMMIT_LOCK = Lock()
 
 if TYPE_CHECKING:
     from .coordinator import VezdehodCoordinator
@@ -47,14 +49,16 @@ class VezdehodSnapshots:
     ) -> None:
         self.hass, self.entry, self.coordinator = hass, entry, coordinator
         media_roots = tuple(map(Path, hass.config.media_dirs.values()))
-        legacy_media_roots = dict.fromkeys((*media_roots, Path(hass.config.path("media"))))
+        legacy_media_roots = dict.fromkeys(
+            (*media_roots, _DEFAULT_MEDIA_ROOT, Path(hass.config.path("media")))
+        )
         account = sha256((entry.unique_id or entry.entry_id).encode()).hexdigest()[:16]
         self.root = Path(hass.config.path(DOMAIN, "snapshots", account))
         self._legacy_roots = tuple(root / DOMAIN / account for root in legacy_media_roots)
         self._shared_roots = (*media_roots, Path(hass.config.path("www")))
         self.signal = f"{DOMAIN}_snapshot_{entry.entry_id}"
         self.latest: dict[str, Snapshot] = {}
-        self._tasks: set[asyncio.Task] = set()
+        self._stopping = Event()
         self._sequence = 0
         self._latest_sequence: dict[str, int] = {}
 
@@ -70,12 +74,13 @@ class VezdehodSnapshots:
         return directory
 
     def _snapshot(self, path: Path) -> Snapshot:
-        if path.stem.endswith("Z"):
-            timestamp = datetime.strptime(path.stem, "%Y%m%dT%H%M%S_%fZ").replace(
-                tzinfo=dt_util.UTC
-            )
+        name, separator, digest = path.stem.partition(".")
+        if separator and not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("Invalid opening photo filename")
+        if name.endswith("Z"):
+            timestamp = datetime.strptime(name, "%Y%m%dT%H%M%S_%fZ").replace(tzinfo=dt_util.UTC)
         else:
-            timestamp = datetime.strptime(path.stem, _LOCAL_FILENAME)
+            timestamp = datetime.strptime(name, _LOCAL_FILENAME)
         timestamp = dt_util.as_utc(timestamp)
         return Snapshot(
             path,
@@ -83,72 +88,142 @@ class VezdehodSnapshots:
             datetime.fromtimestamp(path.stat().st_mtime, tz=dt_util.UTC),
         )
 
+    def _commit_photo(self, staged: Path, target: Path) -> Path:
+        """Publish a complete JPEG without overwriting a different frame."""
+        with _ARCHIVE_COMMIT_LOCK:
+            if self._stopping.is_set():
+                raise InterruptedError("Snapshot archive is unloading")
+            if target.exists():
+                content = staged.read_bytes()
+                if target.is_symlink() or target.read_bytes() != content:
+                    timestamp = target.stem.split(".", 1)[0]
+                    target = target.with_name(f"{timestamp}.{sha256(content).hexdigest()}.jpg")
+                if target.exists():
+                    if target.is_symlink() or target.read_bytes() != content:
+                        raise FileExistsError("Different opening photo at the destination")
+                    if target.stat().st_mtime_ns != staged.stat().st_mtime_ns:
+                        copystat(staged, target)
+                    return target
+            staged.replace(target)
+        return target
+
     def _move_legacy_photo(self, source: Path) -> None:
         self._snapshot(source)  # Only move files with a snapshot filename.
         target = self._directory(source.parent.name) / source.name
-        if target.exists():
-            if target.is_symlink() or target.read_bytes() != source.read_bytes():
-                raise FileExistsError("Different opening photo at the destination")
-            if target.resolve() == source.resolve():
+        if target.resolve() == source.resolve():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=target.parent) as staging_dir:
+            staged = Path(staging_dir) / source.name
+            copy2(source, staged)
+            if self._stopping.is_set():
                 return
-            if target.stat().st_mtime_ns != source.stat().st_mtime_ns:
-                copystat(source, target)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # Media and configuration can be separate mounts. Rename the
-            # complete copy within the destination before removing the source.
-            with TemporaryDirectory(dir=target.parent) as staging_dir:
-                temporary = Path(staging_dir) / source.name
-                copy2(source, temporary)
-                temporary.replace(target)
-        source.unlink()
+            self._commit_photo(staged, target)
+        source.unlink(missing_ok=True)
 
-    def _migrate_legacy(self, legacy_root: Path) -> None:
+    def _migrate_legacy(self, legacy_root: Path) -> bool:
         try:
             resolved_root = legacy_root.resolve()
             if resolved_root == self.root.resolve():
-                return
+                return False
             paths = list(legacy_root.glob("*/*.jpg"))
         except OSError as err:
             _LOGGER.warning("Unable to read old opening photo archive: %s", err)
-            return
+            return False
+        found_photo = False
         for path in paths:
+            if self._stopping.is_set():
+                return found_photo
             try:
                 if path.is_file(follow_symlinks=False) and path.resolve().is_relative_to(
                     resolved_root
                 ):
+                    found_photo = True
                     self._move_legacy_photo(path)
             except ValueError:
                 continue
             except OSError as err:
+                if self._stopping.is_set():
+                    return found_photo
                 _LOGGER.warning("Unable to migrate opening photo %s: %s", path.name, err)
+        return found_photo
 
-    async def async_initialize(self) -> None:
-        def restore():
-            for legacy_root in self._legacy_roots:
-                self._migrate_legacy(legacy_root)
-            result = {}
-            for uid in self.entry.options.get(CONF_BARRIER_IDS, []):
-                try:
-                    files = list(self._directory(uid).glob("*.jpg"))
-                except OSError, ValueError:
-                    continue
-                for path in files:
-                    try:
-                        if path.is_file(follow_symlinks=False):
-                            snapshot = self._snapshot(path)
-                            if uid not in result or snapshot.created_at > result[uid].created_at:
-                                result[uid] = snapshot
-                    except OSError, ValueError:
-                        continue
-            return result
+    def _find_latest(self, uid: str) -> Snapshot | None:
+        try:
+            files = list(self._directory(uid).glob("*.jpg"))
+        except OSError, ValueError:
+            return None
+        latest = None
+        for path in files:
+            try:
+                if path.is_file(follow_symlinks=False):
+                    snapshot = self._snapshot(path)
+                    if latest is None or (snapshot.created_at, snapshot.saved_at) > (
+                        latest.created_at,
+                        latest.saved_at,
+                    ):
+                        latest = snapshot
+            except OSError, ValueError:
+                continue
+        return latest
 
-        self.latest = await self.hass.async_add_executor_job(restore)
+    def _restore(self) -> dict[str, Snapshot]:
+        return {
+            uid: snapshot
+            for uid in self.entry.options.get(CONF_BARRIER_IDS, [])
+            if (snapshot := self._find_latest(uid)) is not None
+        }
+
+    def _restore_legacy(self) -> dict[str, Snapshot]:
+        found_photo = False
+        for legacy_root in self._legacy_roots:
+            if self._stopping.is_set():
+                return {}
+            if self._migrate_legacy(legacy_root):
+                found_photo = True
+        return self._restore() if found_photo else {}
+
+    @callback
+    def _async_apply_restored(self, restored: dict[str, Snapshot]) -> None:
+        for uid, snapshot in restored.items():
+            if uid not in self._latest_sequence and self.latest.get(uid) != snapshot:
+                self._async_set_latest(uid, snapshot)
+
+    async def _async_restore(self) -> None:
+        self._async_apply_restored(await self.hass.async_add_executor_job(self._restore))
+        self._async_apply_restored(await self.hass.async_add_executor_job(self._restore_legacy))
+
+    @callback
+    def async_start_restore(self) -> None:
+        self.entry.async_create_background_task(
+            self.hass, self._async_restore(), "Restore Vezdehod opening photos"
+        )
 
     @callback
     def async_cancel(self) -> None:
-        for task in list(self._tasks):
-            task.cancel()
+        self._stopping.set()
+
+    @callback
+    def _async_set_latest(
+        self, uid: str, snapshot: Snapshot | None, context: Context | None = None
+    ) -> None:
+        if snapshot is None:
+            self.latest.pop(uid, None)
+        else:
+            self.latest[uid] = snapshot
+        async_dispatcher_send(self.hass, self.signal, uid, context)
+
+    async def async_read_latest(self, uid: str) -> bytes | None:
+        while snapshot := self.latest.get(uid):
+            try:
+                return await self.hass.async_add_executor_job(snapshot.file_path.read_bytes)
+            except FileNotFoundError:
+                replacement = await self.hass.async_add_executor_job(self._find_latest, uid)
+                if self.latest.get(uid) is snapshot:
+                    self._async_set_latest(uid, replacement)
+            except OSError:
+                return None
+        return None
 
     @callback
     def async_schedule(self, uid: str, entity_id: str | None, context: Context | None) -> None:
@@ -158,7 +233,8 @@ class VezdehodSnapshots:
         if not barrier or not barrier.camera_url:
             return
         self._sequence += 1
-        task = self.hass.async_create_background_task(
+        self.entry.async_create_background_task(
+            self.hass,
             self._async_save(
                 uid,
                 barrier.camera_url,
@@ -168,22 +244,16 @@ class VezdehodSnapshots:
                 self._sequence,
             ),
             f"Vezdehod opening photo {uid}",
-            eager_start=True,
         )
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
 
     def _write(self, uid: str, content: bytes, created_at: datetime) -> Snapshot:
         directory = self._directory(uid)
         directory.mkdir(parents=True, exist_ok=True)
         target = directory / (dt_util.as_local(created_at).strftime(_LOCAL_FILENAME) + ".jpg")
-        temporary = target.with_suffix(".tmp")
-        try:
-            temporary.write_bytes(content)
-            temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
-        return self._snapshot(target)
+        with TemporaryDirectory(dir=directory) as staging_dir:
+            staged = Path(staging_dir) / target.name
+            staged.write_bytes(content)
+            return self._snapshot(self._commit_photo(staged, target))
 
     async def _async_save(
         self,
@@ -206,8 +276,7 @@ class VezdehodSnapshots:
         is_latest = sequence > self._latest_sequence.get(uid, 0)
         if is_latest:
             self._latest_sequence[uid] = sequence
-            self.latest[uid] = snapshot
-            async_dispatcher_send(self.hass, self.signal, uid, context)
+            self._async_set_latest(uid, snapshot, context)
         self.hass.bus.async_fire(
             f"{DOMAIN}_snapshot_saved",
             {

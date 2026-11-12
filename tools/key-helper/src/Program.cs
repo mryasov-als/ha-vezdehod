@@ -11,8 +11,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("Вездеход — получение ключа")]
 [assembly: AssemblyProduct("Вездеход Key Helper")]
-[assembly: AssemblyVersion("0.1.1.0")]
-[assembly: AssemblyFileVersion("0.1.1.0")]
+[assembly: AssemblyVersion("0.1.2.0")]
+[assembly: AssemblyFileVersion("0.1.2.0")]
 
 namespace VezdehodKeyHelper
 {
@@ -116,7 +116,7 @@ namespace VezdehodKeyHelper
                 Width = 228, Height = 26, TextAlign = ContentAlignment.TopRight,
                 Anchor = AnchorStyles.Top | AnchorStyles.Right, LinkColor = Color.FromArgb(30, 110, 145) };
             about.LinkClicked += delegate {
-                if (MessageBox.Show(this, "Вездеход Key Helper 0.1.1\nВстроенный ADB " + BundleInfo.AdbRevision +
+                if (MessageBox.Show(this, "Вездеход Key Helper 0.1.2\nВстроенный ADB " + BundleInfo.AdbRevision +
                     "\n\nПрограмма ищет данные в журнале только подключённого USB-телефона.\n\nПоказать лицензии встроенных компонентов?",
                     "О программе", MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                 {
@@ -158,7 +158,7 @@ namespace VezdehodKeyHelper
             Controls.Add(results);
             resultNote = TextLabel("", 24, 594, 672, 27, 10, false);
             Controls.Add(resultNote);
-            Label footer = TextLabel("0.1.1 · Перенос данных «Вездехода» в Home Assistant.\nПрограмма не сохраняет номер и ключ в файлы. Копирование — по кнопке.",
+            Label footer = TextLabel("0.1.2 · Перенос данных «Вездехода» в Home Assistant.\nПрограмма не сохраняет номер и ключ в файлы. Копирование — по кнопке.",
                 24, 634, 672, 43, 9, false);
             footer.ForeColor = Color.FromArgb(105, 110, 115);
             Controls.Add(footer);
@@ -166,7 +166,15 @@ namespace VezdehodKeyHelper
             tray.DoubleClick += delegate { Show(); WindowState = FormWindowState.Normal; Activate(); };
             trayTimer = new System.Windows.Forms.Timer { Interval = 6000 };
             trayTimer.Tick += delegate { tray.Visible = false; trayTimer.Stop(); };
-            FormClosing += delegate { closing = true; if (active != null) active.Cancel(); tray.Visible = false; };
+            FormClosing += delegate(object sender, FormClosingEventArgs e) {
+                closing = true;
+                tray.Visible = false;
+                if (active != null)
+                {
+                    e.Cancel = true;
+                    active.Cancel();
+                }
+            };
         }
 
         private void ShowHelp()
@@ -238,10 +246,13 @@ namespace VezdehodKeyHelper
             {
                 Credentials credentials = await Task.Run(delegate {
                     string adb = BundledAdb.Ensure(token);
-                    CaptureEngine engine = new CaptureEngine(new ProcessRunner(adb), delegate(int ms, CancellationToken ct) {
-                        if (ct.WaitHandle.WaitOne(ms)) ct.ThrowIfCancellationRequested();
-                    });
-                    return engine.Capture(token, Report);
+                    using (PrivateAdb session = PrivateAdb.Start(adb, token))
+                    {
+                        CaptureEngine engine = new CaptureEngine(session, delegate(int ms, CancellationToken ct) {
+                            if (ct.WaitHandle.WaitOne(ms)) ct.ThrowIfCancellationRequested();
+                        });
+                        return engine.Capture(token, Report);
+                    }
                 });
                 if (!closing) Found(credentials, true);
             }
@@ -251,7 +262,8 @@ namespace VezdehodKeyHelper
             finally
             {
                 active.Dispose(); active = null;
-                if (!closing) { start.Text = "Старт"; start.Enabled = true; }
+                if (closing) Close();
+                else { start.Text = "Старт"; start.Enabled = true; }
             }
         }
 

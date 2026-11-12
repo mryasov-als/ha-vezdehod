@@ -1,8 +1,10 @@
 """Exercise camera viewing and opening snapshots without cloud operations."""
 
 import asyncio
+from hashlib import sha256
 from os import utime
 from pathlib import Path
+from threading import Event
 from unittest.mock import AsyncMock
 
 import pytest
@@ -163,7 +165,7 @@ async def test_opening_saves_photo_in_event_and_image_without_activity(hass, cam
     camera_api[1].assert_awaited_once_with("101")
     before = camera_api[4].await_count
     assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert hass.states.get(image.entity_id).attributes["file_path"] == str(photo)
     assert camera_api[4].await_count == before
 
@@ -313,7 +315,7 @@ async def test_migration_restores_latest_photo_from_legacy_media(
     for name in [*filenames, "invalid-name.jpg"]:
         (directory / name).write_bytes(camera_api[4].return_value)
     assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     snapshot = entry.runtime_data.snapshots.latest["101"]
     archive = Path(hass.config.path("vezdehod", "snapshots", account, "101"))
     assert {path.name for path in archive.glob("*.jpg")} == set(filenames)
@@ -354,14 +356,14 @@ async def test_legacy_photo_is_preserved_until_migration_can_complete(
     with monkeypatch.context() as patch:
         patch.setattr(Path, "unlink", fail_source_unlink)
         assert await hass.config_entries.async_reload(entry.entry_id)
-        await hass.async_block_till_done()
+        await hass.async_block_till_done(wait_background_tasks=True)
         assert source.read_bytes() == target.read_bytes() == camera_api[4].return_value
         assert source.stat().st_mtime_ns == target.stat().st_mtime_ns
 
     saved_at = source.stat().st_mtime_ns
     utime(target, (0, 0))
     assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert not source.exists()
     assert list(target.parent.glob("*.jpg")) == [target]
     assert target.read_bytes() == camera_api[4].return_value
@@ -401,6 +403,98 @@ async def test_unreadable_photo_directory_does_not_prevent_button_setup(
     await setup_camera(hass)
     await press(hass)
     camera_api[1].assert_awaited_once_with("101")
+
+
+async def test_slow_migration_leaves_button_and_existing_photo_available(
+    hass, camera_api, monkeypatch
+):
+    from custom_components.vezdehod.snapshot import VezdehodSnapshots
+
+    entered, release = asyncio.Event(), Event()
+    entry = make_entry(save_snapshots=False)
+    account = sha256(entry.unique_id.encode()).hexdigest()[:16]
+    photo = Path(
+        hass.config.path("vezdehod", "snapshots", account, "101", "20261105T104000_123456Z.jpg")
+    )
+    photo.parent.mkdir(parents=True)
+    photo.write_bytes(camera_api[4].return_value)
+
+    def slow_migration(_snapshots, _root):
+        hass.loop.call_soon_threadsafe(entered.set)
+        release.wait(5)
+
+    monkeypatch.setattr(VezdehodSnapshots, "_migrate_legacy", slow_migration)
+    try:
+        await asyncio.wait_for(hass.config_entries.async_add(entry), timeout=2)
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        await hass.async_block_till_done()
+        await press(hass)
+        camera_api[1].assert_awaited_once_with("101")
+        assert hass.states.async_all("image")[0].attributes["file_path"] == str(photo)
+    finally:
+        release.set()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+
+@pytest.mark.parametrize("former_default", [False, True])
+async def test_migration_preserves_both_frames_with_the_same_filename(
+    hass, camera_api, monkeypatch, former_default
+):
+    from custom_components.vezdehod import snapshot as platform
+
+    entry, _ = await setup_camera(hass)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    root = entry.runtime_data.snapshots.root
+    media = Path(hass.config.media_dirs["local"])
+    if former_default:
+        media = Path(hass.config.path("former_default_media"))
+        monkeypatch.setattr(platform, "_DEFAULT_MEDIA_ROOT", media, raising=False)
+    filename = "20261105T104000_123456Z.jpg"
+    source = media / "vezdehod" / root.name / "101" / filename
+    target = root / "101" / filename
+    source.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True)
+    source.write_bytes(b"old photo")
+    target.write_bytes(b"new photo")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not source.exists()
+    assert {file.read_bytes() for file in target.parent.glob("*.jpg")} == {
+        b"old photo",
+        b"new photo",
+    }
+    assert entry.runtime_data.snapshots.latest["101"].created_at == dt_util.parse_datetime(
+        "2026-11-05T10:40:00.123456+00:00"
+    )
+
+
+async def test_image_recovers_when_the_current_photo_is_removed(hass, camera_api):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    entry, _ = await setup_camera(hass)
+    directory = entry.runtime_data.snapshots.root / "101"
+    directory.mkdir(parents=True, exist_ok=True)
+    older = directory / "20261105T104000_123456Z.jpg"
+    latest = directory / "20261105T104001_123456Z.jpg"
+    older.write_bytes(b"old photo")
+    latest.write_bytes(b"new photo")
+    assert await hass.config_entries.async_reload(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+    image = hass.states.async_all("image")[0]
+    assert image.attributes["file_path"] == str(latest)
+    latest.unlink()
+    async with TestClient(TestServer(hass.http.app)) as client:
+        response = await client.get(image.attributes["entity_picture"])
+        assert response.status == 200
+        assert await response.read() == older.read_bytes()
+        await hass.async_block_till_done()
+        state = hass.states.get(image.entity_id)
+        assert state.attributes["file_path"] == str(older)
+        older.unlink()
+        response = await client.get(state.attributes["entity_picture"])
+        assert response.status != 200
+        await hass.async_block_till_done()
+        assert hass.states.get(image.entity_id).state == "unavailable"
 
 
 async def test_standard_ha_camera_proxy_serves_the_jpeg(hass, camera_api):
@@ -523,5 +617,5 @@ async def test_earlier_slow_photo_cannot_replace_later_opening(hass, camera_api)
     assert snapshots.latest["101"].file_path == latest_path
     assert len(list(snapshots.root.rglob("*.jpg"))) == 2
     assert await hass.config_entries.async_reload(entry.entry_id)
-    await hass.async_block_till_done()
+    await hass.async_block_till_done(wait_background_tasks=True)
     assert entry.runtime_data.snapshots.latest["101"].file_path == latest_path
