@@ -4,7 +4,7 @@
 из журнала официального «Вездехода» на подключённом **Android-телефоне**.
 Пользователю не нужны Python, отдельная установка ADB, root или новый APK.
 
-[Скачать опубликованный EXE 0.1.1](https://github.com/mryasov-als/ha-vezdehod/releases/download/v0.4.3/vezdehod-key-helper.exe)
+[Скачать Вездеход Key Helper 0.1.2 (EXE)](https://github.com/mryasov-als/ha-vezdehod/releases/download/v0.4.4/vezdehod-key-helper.exe)
 · [Пошаговая инструкция](../../docs/credentials.md#android-перенести-текущий-ключ-через-windows).
 
 Нажмите **«Старт»**, разрешите USB-отладку с ПК и откройте список шлагбаумов

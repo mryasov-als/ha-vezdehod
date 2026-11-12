@@ -78,7 +78,7 @@ Android Auto и голосовой командой через Google Home.
 телефоне или ранее настроенный HA. Импорт существующего ключа не создаёт
 новую SMS-сессию.**
 
-- **Android + Windows:** [скачать EXE получения ключа](https://github.com/mryasov-als/ha-vezdehod/releases/download/v0.4.3/vezdehod-key-helper.exe).
+- **Android + Windows:** [скачать EXE получения ключа](https://github.com/mryasov-als/ha-vezdehod/releases/download/v0.4.4/vezdehod-key-helper.exe).
   Программа запускается на Windows и читает данные с вашего Android-телефона
   по USB. Это не APK; отдельная установка ADB не требуется.
 - **Любой телефон:** можно получить SMS и войти прямо в форме интеграции HA.

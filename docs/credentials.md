@@ -24,7 +24,7 @@
 Потребуются Windows 10/11 **64 бит**, Android-телефон с уже работающим входом
 в официальном «Вездеходе» и USB-кабель с передачей данных.
 
-1. [Скачайте Вездеход Key Helper 0.1.1 (EXE)](https://github.com/mryasov-als/ha-vezdehod/releases/download/v0.4.3/vezdehod-key-helper.exe).
+1. [Скачайте Вездеход Key Helper 0.1.2 (EXE)](https://github.com/mryasov-als/ha-vezdehod/releases/download/v0.4.4/vezdehod-key-helper.exe).
 2. На телефоне включите режим разработчика: обычно **Настройки → О телефоне**,
    несколько нажатий на **«Номер сборки»**. На Xiaomi это может быть версия
    MIUI/HyperOS. Затем в разделе **«Для разработчиков»** включите
